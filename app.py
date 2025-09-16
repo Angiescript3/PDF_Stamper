@@ -1,15 +1,18 @@
 # app.py
-# Streamlit PDF text stamper (single-line text, font picker, color picker, exact preview)
-# pip: streamlit, pymupdf, pillow
+# Streamlit PDF text stamper (single-line text, font picker, color picker, exact preview, CLICK-TO-SET COORDS)
 import io, zipfile
 import streamlit as st
 from PIL import Image, ImageDraw
 import fitz  # PyMuPDF
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 st.set_page_config(page_title="PDF Text Stamper (Demo)", layout="wide")
 
+# ---- defaults via session_state ----
+if "x" not in st.session_state: st.session_state.x = 35
+if "y" not in st.session_state: st.session_state.y = 730
+
 # ---- helpers ----
-# Base-14 fonts map to PyMuPDF aliases we'll insert into the output doc.
 FONT_MAP = {
     "Helvetica": "helv",       # sans
     "Times (Roman)": "tiro",   # serif
@@ -17,7 +20,6 @@ FONT_MAP = {
 }
 
 def parse_pages(text: str, total: int):
-    """Return sorted 0-based page indices parsed from strings like '1-3,5'."""
     if not text or not text.strip():
         return list(range(total))
     out = set()
@@ -45,7 +47,6 @@ def parse_pages(text: str, total: int):
     return sorted([p - 1 for p in out])  # convert to 0-based
 
 def hex_to_rgb01(hex_color: str):
-    """#RRGGBB -> (r,g,b) floats in 0..1 for PyMuPDF color."""
     hex_color = hex_color.lstrip("#")
     return (int(hex_color[0:2],16)/255.0,
             int(hex_color[2:4],16)/255.0,
@@ -53,18 +54,14 @@ def hex_to_rgb01(hex_color: str):
 
 def overlay_copy(src_doc, text: str, coords, pages,
                  font_size=12, fontname="helv", color_hex="#000000") -> bytes:
-    """Create a new multi-page PDF with text stamped on each selected page."""
     x, y = coords
-    y = y + font_size  # small baseline offset similar to desktop behavior
+    y = y + font_size  # baseline offset (matches preview)
     color = hex_to_rgb01(color_hex)
 
     ndoc = fitz.open()
-
-    # Register a base-14 font into the destination doc to avoid font-file errors.
     try:
-        font_alias = ndoc.insert_font(fontname=fontname)  # "helv", "tiro", or "cour"
+        font_alias = ndoc.insert_font(fontname=fontname)
     except Exception:
-        # Fallback to Helvetica; final fallback passes no fontname at all.
         try:
             font_alias = ndoc.insert_font(fontname="helv")
         except Exception:
@@ -87,7 +84,6 @@ def overlay_copy(src_doc, text: str, coords, pages,
 
 def overlay_per_page(src_doc, text: str, coords, pages,
                      font_size=12, fontname="helv", color_hex="#000000"):
-    """Return dict {filename: bytes} for one PDF per selected page."""
     files = {}
     for p in pages:
         data = overlay_copy(src_doc, text, coords, [p], font_size, fontname, color_hex)
@@ -96,19 +92,14 @@ def overlay_per_page(src_doc, text: str, coords, pages,
 
 def render_stamped_preview(src_doc, page_index: int, text: str, coords,
                            font_size=12, fontname="helv", color_hex="#000000", zoom=1.25) -> Image.Image:
-    """
-    Render an exact preview by stamping the selected page in-memory via PyMuPDF,
-    then rasterizing that stamped page to a Pillow image.
-    """
+    """Exact preview: stamp via PyMuPDF in-memory, then rasterize."""
     x, y = coords
-    y_pdf = y + font_size  # match export offset
+    y_pdf = y + font_size
     color = hex_to_rgb01(color_hex)
 
-    # Build a one-page stamped doc for preview
     ndoc = fitz.open()
     ndoc.insert_pdf(src_doc, from_page=page_index, to_page=page_index)
 
-    # Ensure the font exists in the preview doc
     try:
         font_alias = ndoc.insert_font(fontname=fontname)
     except Exception:
@@ -124,7 +115,6 @@ def render_stamped_preview(src_doc, page_index: int, text: str, coords,
             kwargs["fontname"] = font_alias
         page.insert_text((x, y_pdf), text, **kwargs)
 
-    # Rasterize stamped page
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -134,7 +124,7 @@ def render_stamped_preview(src_doc, page_index: int, text: str, coords,
 
 # ---- UI ----
 st.title("PDF Text Stamper (Portfolio Demo)")
-st.caption("Upload a PDF → choose pages → enter any text → choose font & color → download stamped copy.")
+st.caption("Upload a PDF → choose pages → enter any text → choose font & color → click the preview to set coords → download.")
 
 with st.sidebar:
     st.header("Stamp Settings")
@@ -145,10 +135,16 @@ with st.sidebar:
     color_hex = st.color_picker("Text color", "#000000")
 
     pages_str = st.text_input("Pages (e.g., 1-3,5 — blank = all)", value="")
-    # Defaults requested: x=35, y=730
-    x = st.number_input("X", min_value=0, max_value=5000, value=35, step=1)
-    y = st.number_input("Y", min_value=0, max_value=5000, value=730, step=1)
 
+    # Bind to session_state so clicks update these values
+    x = st.number_input("X", min_value=0, max_value=5000, value=st.session_state.x, step=1, key="x_num")
+    y = st.number_input("Y", min_value=0, max_value=5000, value=st.session_state.y, step=1, key="y_num")
+
+    # Keep session_state.x/y in sync with manual edits
+    st.session_state.x = int(x)
+    st.session_state.y = int(y)
+
+    click_to_set = st.checkbox("Click to set coords on preview", value=True)
     show_crosshair = st.checkbox("Show crosshair marker on preview", value=True)
     crosshair_len = st.slider("Crosshair length (px, preview only)", 10, 200, 40)
     mode = st.radio("Export mode", ["Group (one PDF)", "Per-page (ZIP)"])
@@ -178,24 +174,46 @@ with col1:
     try:
         zoom = 1.25
         font_alias = FONT_MAP[font_label]
-        # Exact preview: render the stamped page using the same engine as export
+
+        # Exact stamped preview image
         preview_img = render_stamped_preview(
-            doc, pages[0], stamp_text, (x, y),
+            doc, pages[0], stamp_text, (st.session_state.x, st.session_state.y),
             font_size=font_size, fontname=font_alias, color_hex=color_hex, zoom=zoom
         )
 
         # Optional crosshair overlay for placement guidance
+        img_to_show = preview_img
         if show_crosshair:
-            img = preview_img.copy()
-            draw = ImageDraw.Draw(img)
-            cx = int(x * zoom)
-            cy = int((y + font_size) * zoom)
+            img_to_show = preview_img.copy()
+            draw = ImageDraw.Draw(img_to_show)
+            cx = int(st.session_state.x * zoom)
+            cy = int((st.session_state.y + font_size) * zoom)
             L = crosshair_len
             draw.line((cx - L, cy, cx + L, cy), fill="#FF0000", width=1)
             draw.line((cx, cy - L, cx, cy + L), fill="#FF0000", width=1)
-            st.image(img, caption=f"Page {pages[0]+1} / {total_pages}", use_container_width=True)
+
+        if click_to_set:
+            st.caption("Tip: Click where you want the **baseline** of the text to start.")
+            result = streamlit_image_coordinates(img_to_show, key="coord_clicker")
+            if result is not None and "x" in result and "y" in result:
+                # Convert from preview pixels -> PDF coords (baseline)
+                click_x_px, click_y_px = result["x"], result["y"]
+                new_x = int(round(click_x_px / zoom))
+                new_y = int(round(click_y_px / zoom) - font_size)  # inverse of +font_size baseline shift
+
+                # Clamp to non-negative
+                new_x = max(0, new_x)
+                new_y = max(0, new_y)
+
+                # Update session + widgets
+                st.session_state.x = new_x
+                st.session_state.y = new_y
+                st.session_state.x_num = new_x
+                st.session_state.y_num = new_y
+
+                st.success(f"Set coords from click → X={new_x}, Y={new_y}")
         else:
-            st.image(preview_img, caption=f"Page {pages[0]+1} / {total_pages}", use_container_width=True)
+            st.image(img_to_show, caption=f"Page {pages[0]+1} / {total_pages}", use_container_width=True)
 
     except Exception as e:
         st.warning(f"Preview failed: {e}")
@@ -206,7 +224,7 @@ with col2:
     st.write(f"**Text:** `{stamp_text or '(none)'}`")
     st.write(f"**Font:** {font_label}  •  **Size:** {font_size}")
     st.write(f"**Color:** {color_hex}")
-    st.write(f"**Coords:** ({x}, {y})  (baseline anchor ≈ at y + font_size)")
+    st.write(f"**Coords:** ({st.session_state.x}, {st.session_state.y})  (baseline anchor)")
 
     if st.button("Export"):
         if not stamp_text.strip():
@@ -214,8 +232,9 @@ with col2:
         else:
             try:
                 font_alias = FONT_MAP[font_label]
+                coords = (st.session_state.x, st.session_state.y)
                 if mode.startswith("Group"):
-                    stamped = overlay_copy(doc, stamp_text, (x, y), pages, font_size, font_alias, color_hex)
+                    stamped = overlay_copy(doc, stamp_text, coords, pages, font_size, font_alias, color_hex)
                     st.download_button(
                         "Download stamped PDF",
                         data=stamped,
@@ -223,7 +242,7 @@ with col2:
                         mime="application/pdf",
                     )
                 else:
-                    files = overlay_per_page(doc, stamp_text, (x, y), pages, font_size, font_alias, color_hex)
+                    files = overlay_per_page(doc, stamp_text, coords, pages, font_size, font_alias, color_hex)
                     zip_buf = io.BytesIO()
                     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
                         for name, data in files.items():
