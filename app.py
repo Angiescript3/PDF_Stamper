@@ -1,5 +1,5 @@
 # app.py
-# Streamlit PDF text stamper (single-line text, font picker, color picker, exact preview, CLICK-TO-SET COORDS)
+# Streamlit PDF text stamper (single-line text, font & color, exact preview, CLICK-TO-SET COORDS)
 import io, zipfile
 import streamlit as st
 from PIL import Image, ImageDraw
@@ -31,8 +31,7 @@ def parse_pages(text: str, total: int):
             a, b = part.split("-", 1)
             try:
                 a, b = int(a), int(b)
-                if a > b:
-                    a, b = b, a
+                if a > b: a, b = b, a
                 a = max(1, a); b = min(total, b)
                 out.update(range(a, b + 1))
             except ValueError:
@@ -136,13 +135,11 @@ with st.sidebar:
 
     pages_str = st.text_input("Pages (e.g., 1-3,5 — blank = all)", value="")
 
-    # Bind to session_state so clicks update these values
-    x = st.number_input("X", min_value=0, max_value=5000, value=st.session_state.x, step=1, key="x_num")
-    y = st.number_input("Y", min_value=0, max_value=5000, value=st.session_state.y, step=1, key="y_num")
-
-    # Keep session_state.x/y in sync with manual edits
-    st.session_state.x = int(x)
-    st.session_state.y = int(y)
+    # Number inputs read from state and write back to state
+    new_x = st.number_input("X", min_value=0, max_value=5000, value=st.session_state.x, step=1)
+    new_y = st.number_input("Y", min_value=0, max_value=5000, value=st.session_state.y, step=1)
+    if new_x != st.session_state.x: st.session_state.x = int(new_x)
+    if new_y != st.session_state.y: st.session_state.y = int(new_y)
 
     click_to_set = st.checkbox("Click to set coords on preview", value=True)
     show_crosshair = st.checkbox("Show crosshair marker on preview", value=True)
@@ -195,23 +192,17 @@ with col1:
         if click_to_set:
             st.caption("Tip: Click where you want the **baseline** of the text to start.")
             result = streamlit_image_coordinates(img_to_show, key="coord_clicker")
-            if result is not None and "x" in result and "y" in result:
+            if result and "x" in result and "y" in result:
                 # Convert from preview pixels -> PDF coords (baseline)
                 click_x_px, click_y_px = result["x"], result["y"]
-                new_x = int(round(click_x_px / zoom))
-                new_y = int(round(click_y_px / zoom) - font_size)  # inverse of +font_size baseline shift
+                new_x = max(0, int(round(click_x_px / zoom)))
+                new_y = max(0, int(round(click_y_px / zoom) - font_size))  # inverse of +font_size shift
 
-                # Clamp to non-negative
-                new_x = max(0, new_x)
-                new_y = max(0, new_y)
-
-                # Update session + widgets
+                # Update state and rerun to refresh widgets cleanly
                 st.session_state.x = new_x
                 st.session_state.y = new_y
-                st.session_state.x_num = new_x
-                st.session_state.y_num = new_y
-
                 st.success(f"Set coords from click → X={new_x}, Y={new_y}")
+                st.rerun()
         else:
             st.image(img_to_show, caption=f"Page {pages[0]+1} / {total_pages}", use_container_width=True)
 
