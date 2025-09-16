@@ -1,5 +1,7 @@
 # app.py
-# Streamlit PDF text stamper — exact preview, click-to-capture (no live flashing)
+# Streamlit PDF text stamper — simple UX:
+# - Preview is always clickable: one click sets X/Y (baseline) and refreshes preview once.
+# - No "capture" mode. No extra confirm buttons. Just one "Update Preview" button.
 import io, zipfile
 import streamlit as st
 from PIL import Image, ImageDraw
@@ -13,16 +15,15 @@ def ss_default(key, val):
     if key not in st.session_state:
         st.session_state[key] = val
 
-ss_default("x", 35)
+ss_default("x", 35)                  # your preferred defaults
 ss_default("y", 730)
 ss_default("stamp_text", "")
 ss_default("font_label", "Helvetica")
 ss_default("font_size", 12)
 ss_default("color_hex", "#000000")
 ss_default("pages_str", "")
-ss_default("refresh_preview", True)   # show preview on first load
-ss_default("capture_mode", False)     # clicking mode off by default
-ss_default("temp_click", None)        # holds last click while capturing
+ss_default("refresh_preview", True)  # render once at start
+ss_default("_last_preview", None)
 
 # ---------- helpers ----------
 FONT_MAP = {
@@ -66,7 +67,7 @@ def hex_to_rgb01(hex_color: str):
 def overlay_copy(src_doc, text: str, coords, pages,
                  font_size=12, fontname="helv", color_hex="#000000") -> bytes:
     x, y = coords
-    y = y + font_size  # baseline offset
+    y = y + font_size  # baseline offset (export + preview match)
     color = hex_to_rgb01(color_hex)
 
     ndoc = fitz.open()
@@ -87,11 +88,11 @@ def overlay_copy(src_doc, text: str, coords, pages,
                 kwargs["fontname"] = font_alias
             page.insert_text((x, y), text, **kwargs)
 
-    out = io.BytesIO()
-    ndoc.save(out)
+    out_buf = io.BytesIO()
+    ndoc.save(out_buf)
     ndoc.close()
-    out.seek(0)
-    return out.read()
+    out_buf.seek(0)
+    return out_buf.read()
 
 def overlay_per_page(src_doc, text: str, coords, pages,
                      font_size=12, fontname="helv", color_hex="#000000"):
@@ -103,6 +104,7 @@ def overlay_per_page(src_doc, text: str, coords, pages,
 
 def render_stamped_preview(src_doc, page_index: int, text: str, coords,
                            font_size=12, fontname="helv", color_hex="#000000", zoom=1.25) -> Image.Image:
+    """Exact preview: stamp via PyMuPDF in-memory, then rasterize."""
     x, y = coords
     y_pdf = y + font_size
     color = hex_to_rgb01(color_hex)
@@ -131,66 +133,31 @@ def render_stamped_preview(src_doc, page_index: int, text: str, coords,
     ndoc.close()
     return img
 
-# ---------- sidebar: settings in a form (apply to commit) ----------
+# ---------- sidebar (no auto preview updates) ----------
 with st.sidebar:
     st.header("Stamp Settings")
 
-    with st.form("settings_form", clear_on_submit=False):
-        stamp_text = st.text_input("Stamp text", value=st.session_state.stamp_text, placeholder="Type anything…")
-        font_label = st.selectbox("Font", list(FONT_MAP.keys()), index=list(FONT_MAP.keys()).index(st.session_state.font_label))
-        font_size = st.number_input("Font size", min_value=6, max_value=96, value=st.session_state.font_size, step=1)
-        color_hex = st.color_picker("Text color", st.session_state.color_hex)
-        pages_str = st.text_input("Pages (e.g., 1-3,5 — blank = all)", value=st.session_state.pages_str)
-        x_val = st.number_input("X", min_value=0, max_value=5000, value=st.session_state.x, step=1)
-        y_val = st.number_input("Y", min_value=0, max_value=5000, value=st.session_state.y, step=1)
+    st.session_state.stamp_text = st.text_input(
+        "Stamp text", value=st.session_state.stamp_text, placeholder="Type anything…"
+    )
+    st.session_state.font_label = st.selectbox(
+        "Font", list(FONT_MAP.keys()), index=list(FONT_MAP.keys()).index(st.session_state.font_label)
+    )
+    st.session_state.font_size = int(st.number_input(
+        "Font size", min_value=6, max_value=96, value=st.session_state.font_size, step=1
+    ))
+    st.session_state.color_hex = st.color_picker("Text color", st.session_state.color_hex)
 
-        colA, colB = st.columns(2)
-        with colA:
-            apply_btn = st.form_submit_button("Apply Settings")
-        with colB:
-            upd_prev_btn = st.form_submit_button("Update Preview")
+    st.session_state.pages_str = st.text_input(
+        "Pages (e.g., 1-3,5 — blank = all)", value=st.session_state.pages_str
+    )
 
-    # Commit only when user clicks
-    if apply_btn:
-        st.session_state.stamp_text = stamp_text
-        st.session_state.font_label = font_label
-        st.session_state.font_size = int(font_size)
-        st.session_state.color_hex = color_hex
-        st.session_state.pages_str = pages_str
-        st.session_state.x = int(x_val)
-        st.session_state.y = int(y_val)
+    # X/Y are editable but do not trigger preview refresh until user clicks Update Preview
+    st.session_state.x = int(st.number_input("X", min_value=0, max_value=5000, value=st.session_state.x, step=1))
+    st.session_state.y = int(st.number_input("Y", min_value=0, max_value=5000, value=st.session_state.y, step=1))
+
+    if st.button("Update Preview"):
         st.session_state.refresh_preview = True
-
-    if upd_prev_btn:
-        st.session_state.refresh_preview = True
-
-    # Capture controls (separate from settings)
-    st.markdown("---")
-    st.subheader("Coordinate Capture")
-    cap_col1, cap_col2 = st.columns(2)
-    with cap_col1:
-        if not st.session_state.capture_mode:
-            if st.button("Start Capture"):
-                st.session_state.capture_mode = True
-                st.session_state.temp_click = None
-                st.session_state.refresh_preview = True
-        else:
-            if st.button("Cancel Capture"):
-                st.session_state.capture_mode = False
-                st.session_state.temp_click = None
-                st.session_state.refresh_preview = True
-    with cap_col2:
-        use_btn_disabled = not (st.session_state.capture_mode and st.session_state.temp_click)
-        if st.button("Use This Point", disabled=use_btn_disabled):
-            # Apply captured coords (baseline), exit capture, refresh preview once
-            click_x_px, click_y_px, zoom = st.session_state.temp_click
-            new_x = max(0, int(round(click_x_px / zoom)))
-            new_y = max(0, int(round(click_y_px / zoom) - st.session_state.font_size))
-            st.session_state.x = new_x
-            st.session_state.y = new_y
-            st.session_state.capture_mode = False
-            st.session_state.refresh_preview = True
-            st.success(f"Coordinates saved → X={new_x}, Y={new_y}")
 
 # ---------- file upload ----------
 uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
@@ -211,49 +178,47 @@ pages = parse_pages(st.session_state.pages_str, total_pages)
 if not pages:
     pages = list(range(total_pages))
 
-# ---------- preview ----------
+# ---------- preview + click-to-set (single rerun per click) ----------
 col1, col2 = st.columns([3, 2])
 
 with col1:
-    st.subheader("Preview (first selected page)")
+    st.subheader("Preview (click to set coords)")
     try:
         zoom = 1.25
         font_alias = FONT_MAP[st.session_state.font_label]
 
-        # Only (re)render when asked
-        if st.session_state.refresh_preview:
+        # Render (or reuse) preview
+        if st.session_state.refresh_preview or st.session_state._last_preview is None:
             base_img = render_stamped_preview(
                 doc, pages[0], st.session_state.stamp_text, (st.session_state.x, st.session_state.y),
                 font_size=st.session_state.font_size, fontname=font_alias,
                 color_hex=st.session_state.color_hex, zoom=zoom
             )
-            st.session_state._last_preview = base_img  # cache stamped preview
+            st.session_state._last_preview = base_img
             st.session_state.refresh_preview = False
 
-        img_to_show = st.session_state.get("_last_preview")
+        # Draw a small crosshair at current coords (purely visual)
+        img_to_show = st.session_state._last_preview.copy()
+        draw = ImageDraw.Draw(img_to_show)
+        cx = int(st.session_state.x * zoom)
+        cy = int((st.session_state.y + st.session_state.font_size) * zoom)
+        L = 30
+        draw.line((cx - L, cy, cx + L, cy), fill="#FF0000", width=1)
+        draw.line((cx, cy - L, cx, cy + L), fill="#FF0000", width=1)
 
-        # Crosshair overlay only when in capture mode (helps you aim)
-        if st.session_state.capture_mode and img_to_show is not None:
-            img_to_show = img_to_show.copy()
-            draw = ImageDraw.Draw(img_to_show)
-            cx = int(st.session_state.x * zoom)
-            cy = int((st.session_state.y + st.session_state.font_size) * zoom)
-            L = 40
-            draw.line((cx - L, cy, cx + L, cy), fill="#FF0000", width=1)
-            draw.line((cx, cy - L, cx, cy + L), fill="#FF0000", width=1)
+        st.caption("Click where you want the **baseline** of the text to start (one click = one update).")
+        result = streamlit_image_coordinates(img_to_show, key="coord_clicker_simple")
 
-        if st.session_state.capture_mode and img_to_show is not None:
-            st.caption("Click once where you want the **baseline** to start. Then press **Use This Point**.")
-            result = streamlit_image_coordinates(img_to_show, key="coord_clicker_static")
-            if result and "x" in result and "y" in result:
-                # Stash click (do NOT apply yet)
-                st.session_state.temp_click = (result["x"], result["y"], zoom)
-                st.info(f"Captured: x={result['x']}, y={result['y']} (preview pixels)")
-        else:
-            if img_to_show is not None:
-                st.image(img_to_show, caption=f"Page {pages[0]+1} / {total_pages}", use_container_width=True)
-            else:
-                st.info("Preview will appear here after you apply settings or update preview.")
+        # If a new click arrives, update coords and refresh preview once
+        if result and "x" in result and "y" in result:
+            new_x = max(0, int(round(result["x"] / zoom)))
+            new_y = max(0, int(round(result["y"] / zoom) - st.session_state.font_size))  # inverse baseline shift
+            # Only change if it's a real move, to avoid tiny jitters
+            if new_x != st.session_state.x or new_y != st.session_state.y:
+                st.session_state.x = new_x
+                st.session_state.y = new_y
+                st.session_state.refresh_preview = True
+                st.rerun()  # single rerun to show the new preview
 
     except Exception as e:
         st.warning(f"Preview failed: {e}")
@@ -265,8 +230,10 @@ with col2:
     st.write(f"**Font:** {st.session_state.font_label}  •  **Size:** {st.session_state.font_size}")
     st.write(f"**Color:** {st.session_state.color_hex}")
     st.write(f"**Coords:** ({st.session_state.x}, {st.session_state.y})  (baseline anchor)")
-    st.caption("Preview updates only when you **Apply Settings**, **Update Preview**, or **Use This Point**.")
+    st.caption("Preview only updates on **click** or when you press **Update Preview**.")
 
+    # Export mode selector lives here to avoid extra reruns while editing settings
+    export_mode = st.radio("Export mode", ["Group (one PDF)", "Per-page (ZIP)"], index=0)
     if st.button("Export"):
         if not st.session_state.stamp_text.strip():
             st.error("Please enter stamp text.")
@@ -274,8 +241,7 @@ with col2:
             try:
                 font_alias = FONT_MAP[st.session_state.font_label]
                 coords = (st.session_state.x, st.session_state.y)
-                if st.radio("Export mode", ["Group (one PDF)", "Per-page (ZIP)"], index=0, key="exp_mode") \
-                        .startswith("Group"):
+                if export_mode.startswith("Group"):
                     stamped = overlay_copy(doc, st.session_state.stamp_text, coords, pages,
                                            st.session_state.font_size, font_alias, st.session_state.color_hex)
                     st.download_button("Download stamped PDF", data=stamped,
