@@ -1,6 +1,5 @@
 # app.py
 # Streamlit PDF text stamper (single-line text, font picker, color picker, crosshair preview)
-# pip: streamlit, pymupdf, pillow
 import io, zipfile
 import streamlit as st
 from PIL import Image, ImageDraw
@@ -9,7 +8,6 @@ import fitz  # PyMuPDF
 st.set_page_config(page_title="PDF Text Stamper (Demo)", layout="wide")
 
 # ---- helpers ----
-# Base-14 fonts map to PyMuPDF aliases we'll insert into the output doc.
 FONT_MAP = {
     "Helvetica": "helv",       # sans
     "Times (Roman)": "tiro",   # serif
@@ -17,7 +15,6 @@ FONT_MAP = {
 }
 
 def parse_pages(text: str, total: int):
-    """Return sorted 0-based page indices parsed from strings like '1-3,5'."""
     if not text or not text.strip():
         return list(range(total))
     out = set()
@@ -31,9 +28,7 @@ def parse_pages(text: str, total: int):
                 a, b = int(a), int(b)
                 if a > b:
                     a, b = b, a
-                # clamp to 1..total
-                a = max(1, a)
-                b = min(total, b)
+                a = max(1, a); b = min(total, b)
                 out.update(range(a, b + 1))
             except ValueError:
                 continue
@@ -44,42 +39,33 @@ def parse_pages(text: str, total: int):
                     out.add(n)
             except ValueError:
                 continue
-    return sorted([p - 1 for p in out])  # convert to 0-based
+    return sorted([p - 1 for p in out])
 
 def render_page(doc, page_idx: int, zoom=1.25) -> Image.Image:
-    """Rasterize a page for on-screen preview."""
     page = doc[page_idx]
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
     return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
 def hex_to_rgb01(hex_color: str):
-    """#RRGGBB -> (r,g,b) floats in 0..1 for PyMuPDF color."""
     hex_color = hex_color.lstrip("#")
-    r = int(hex_color[0:2], 16) / 255.0
-    g = int(hex_color[2:4], 16) / 255.0
-    b = int(hex_color[4:6], 16) / 255.0
-    return (r, g, b)
+    return (int(hex_color[0:2],16)/255.0,
+            int(hex_color[2:4],16)/255.0,
+            int(hex_color[4:6],16)/255.0)
 
 def overlay_copy(src_doc, text: str, coords, pages,
                  font_size=12, fontname="helv", color_hex="#000000") -> bytes:
-    """Create a new multi-page PDF with text stamped on each selected page."""
     x, y = coords
-    y = y + font_size  # small baseline offset similar to desktop behavior
+    y = y + font_size
     color = hex_to_rgb01(color_hex)
-
     ndoc = fitz.open()
-
-    # Register a base-14 font into the destination doc to avoid font-file errors.
     try:
-        font_alias = ndoc.insert_font(fontname=fontname)  # "helv", "tiro", or "cour"
+        font_alias = ndoc.insert_font(fontname=fontname)
     except Exception:
-        # Fallback to Helvetica; final fallback passes no fontname at all.
         try:
             font_alias = ndoc.insert_font(fontname="helv")
         except Exception:
             font_alias = None
-
     for p in pages:
         ndoc.insert_pdf(src_doc, from_page=p, to_page=p)
         if text.strip():
@@ -88,7 +74,6 @@ def overlay_copy(src_doc, text: str, coords, pages,
             if font_alias:
                 kwargs["fontname"] = font_alias
             page.insert_text((x, y), text, **kwargs)
-
     out_buf = io.BytesIO()
     ndoc.save(out_buf)
     ndoc.close()
@@ -97,7 +82,6 @@ def overlay_copy(src_doc, text: str, coords, pages,
 
 def overlay_per_page(src_doc, text: str, coords, pages,
                      font_size=12, fontname="helv", color_hex="#000000"):
-    """Return dict {filename: bytes} for one PDF per selected page."""
     files = {}
     for p in pages:
         data = overlay_copy(src_doc, text, coords, [p], font_size, fontname, color_hex)
@@ -111,16 +95,12 @@ st.caption("Upload a PDF → choose pages → enter any text → choose font & c
 with st.sidebar:
     st.header("Stamp Settings")
     stamp_text = st.text_input("Stamp text", value="", placeholder="Type anything…")
-
     font_label = st.selectbox("Font", list(FONT_MAP.keys()), index=0)
     font_size = st.number_input("Font size", min_value=6, max_value=96, value=12, step=1)
     color_hex = st.color_picker("Text color", "#000000")
-
     pages_str = st.text_input("Pages (e.g., 1-3,5 — blank = all)", value="")
-    # Defaults requested: x=35, y=730
     x = st.number_input("X", min_value=0, max_value=5000, value=35, step=1)
     y = st.number_input("Y", min_value=0, max_value=5000, value=730, step=1)
-
     show_crosshair = st.checkbox("Show crosshair marker on preview", value=True)
     crosshair_len = st.slider("Crosshair length (px, preview only)", 10, 200, 40)
     mode = st.radio("Export mode", ["Group (one PDF)", "Per-page (ZIP)"])
@@ -130,7 +110,6 @@ if not uploaded:
     st.info("Upload a PDF to begin.")
     st.stop()
 
-# Open PDF from memory
 pdf_bytes = uploaded.read()
 try:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -153,11 +132,13 @@ with col1:
         img = preview_img.copy()
         draw = ImageDraw.Draw(img)
 
-        # approximate preview text at scaled coords (visual only)
         if stamp_text.strip():
-            draw.text((x * zoom, (y + font_size) * zoom), stamp_text, fill=to_hex = color_hex)
+            draw.text(
+                (x * zoom, (y + font_size) * zoom),
+                stamp_text,
+                fill=color_hex  # ✅ fixed
+            )
 
-        # crosshair shows the anchor point ≈ baseline start after small offset
         if show_crosshair:
             cx = int(x * zoom)
             cy = int((y + font_size) * zoom)
@@ -175,7 +156,7 @@ with col2:
     st.write(f"**Text:** `{stamp_text or '(none)'}`")
     st.write(f"**Font:** {font_label}  •  **Size:** {font_size}")
     st.write(f"**Color:** {color_hex}")
-    st.write(f"**Coords:** ({x}, {y})  (anchor ≈ at crosshair)")
+    st.write(f"**Coords:** ({x}, {y})")
 
     if st.button("Export"):
         if not stamp_text.strip():
